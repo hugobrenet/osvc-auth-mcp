@@ -124,7 +124,7 @@ func TestExchangeCacheSharesOneExchangeBetweenConcurrentCalls(t *testing.T) {
 	}
 }
 
-func TestExchangeCacheNeverCachesFailures(t *testing.T) {
+func TestExchangeCacheRemembersFailuresForFiveSeconds(t *testing.T) {
 	c, clock := newTestCache()
 	refused := errors.New("token exchange refused by SSO (invalid_grant)")
 	var calls atomic.Int32
@@ -134,11 +134,17 @@ func TestExchangeCacheNeverCachesFailures(t *testing.T) {
 		}
 		return exchanged{token: "ok", deadline: clock.Now().Add(time.Hour)}, nil
 	}
-	if _, err := c.get(t.Context(), "key", exchange); err != refused {
-		t.Fatalf("err = %v", err)
+	for range 3 {
+		if _, err := c.get(t.Context(), "key", exchange); err != refused {
+			t.Fatalf("err = %v", err)
+		}
 	}
+	if calls.Load() != 1 {
+		t.Fatalf("a client looping on a refused token reached the SSO %d times", calls.Load())
+	}
+	clock.Add(5 * time.Second)
 	if result, err := c.get(t.Context(), "key", exchange); err != nil || result.token != "ok" || calls.Load() != 2 {
-		t.Fatalf("failure cached: %v %d exchanges", err, calls.Load())
+		t.Fatalf("failure remembered too long: %v %d exchanges", err, calls.Load())
 	}
 }
 
