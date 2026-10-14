@@ -1,2 +1,59 @@
 # osvc-auth-mcp
-Shared OAuth resource-server and RFC 8693 token-exchange library for the OpenSVC MCP servers
+
+Shared OAuth resource-server and RFC 8693 token-exchange library for the
+OpenSVC MCP servers, [om3-mcp](https://github.com/opensvc/om3-mcp) and
+[oc3-mcp](https://github.com/opensvc/oc3-mcp).
+
+An MCP server serves external clients over HTTPS. Their OAuth access tokens are
+intended for the MCP and never reach its target. Each tool call exchanges them
+for a token intended for the target (an OpenSVC cluster daemon or the
+collector), which verifies it independently.
+
+## Packages
+
+- `mcpauth`
+  - `OAuthVerifier`: verifies the access JWTs of the MCP resource locally
+    (issuer JWKS, issuer, audience = the resource URL, dates), serves the
+    RFC 9728 resource metadata and the 401 challenge. `Middleware` removes the
+    `Authorization` header and the headers its caller names.
+  - `ExchangeProfiles`: the confidential exchange clients loaded from
+    `auth.yaml`. `Prepare` exchanges the token of one tool call for a target
+    audience; `ExchangedFromContext` returns it to the transport of the
+    target, with the opaque target value given to `Prepare`.
+  - `CallTrace`: credential-free audit facts of a tool call.
+  - `ValidClaimText`, `OpenIDSigningMethod`, `MaxTokenBytes`: the token checks
+    shared with the delegated tokens of the MCP servers.
+- `mcpauthtest`: fake OAuth provider, HTTPS server and exchange profiles for
+  the tests of the MCP servers.
+
+## Exchange profiles
+
+```yaml
+version: 1
+profiles:
+  customer-sso:
+    issuer: https://sso.example.com/application/o/mcp-exchange/
+    client_id: mcp-exchange
+    client_secret_file: /etc/opensvc-mcp/secrets/mcp-exchange
+    token_endpoint_auth_method: client_secret_basic
+    scopes: [openid, profile]
+    request_timeout: 10s
+```
+
+The secret file must not be readable by group or others (`0600` or `0400`).
+The scopes are those of the target provider: request the scope that carries
+the claims the target authorizes.
+
+## Development
+
+```bash
+gofmt -l .
+go mod verify && go mod tidy -diff
+go vet ./...
+go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 ./...
+go test -race -count=1 ./...
+```
+
+An MCP server tests a local change of this module with a `replace` directive
+pointing to its checkout, never committed. A change is released with a tag,
+then each MCP server updates its `go.mod`.
