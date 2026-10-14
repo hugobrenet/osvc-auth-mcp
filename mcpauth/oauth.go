@@ -14,8 +14,6 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-
-	"github.com/golang-jwt/jwt/v5"
 )
 
 // OAuthConfig describes the MCP resource server, not a target audience or a
@@ -158,60 +156,13 @@ func (v *OAuthVerifier) Metadata(w http.ResponseWriter, r *http.Request) {
 var errOAuthUnavailable = errors.New("OAuth signing keys unavailable")
 
 func (v *OAuthVerifier) verify(ctx context.Context, raw string) (OAuthIdentity, error) {
-	if raw == "" || len(raw) > MaxTokenBytes {
-		return OAuthIdentity{}, errUnauthorized
-	}
-	// Reject obviously invalid claims before contacting the issuer. Unverified
-	// claims never establish an identity or select an issuer, key URL or target.
-	var claims struct {
-		jwt.RegisteredClaims
-		ClientID string `json:"client_id"`
-		AZP      string `json:"azp"`
-	}
-	token, _, err := jwt.NewParser().ParseUnverified(raw, &claims)
-	if err != nil || token == nil {
-		return OAuthIdentity{}, errUnauthorized
-	}
-	if !OpenIDSigningMethod(token.Method.Alg()) {
-		return OAuthIdentity{}, errUnauthorized
-	}
-	if !ValidClaimText(claims.Subject) {
-		return OAuthIdentity{}, errUnauthorized
-	}
-	options := []jwt.ParserOption{jwt.WithIssuer(v.config.Issuer), jwt.WithAudience(v.config.ResourceURL), jwt.WithExpirationRequired(), jwt.WithIssuedAt()}
-	if err := jwt.NewValidator(options...).Validate(&claims); err != nil {
-		return OAuthIdentity{}, errUnauthorized
-	}
-	kid, ok := token.Header["kid"].(string)
-	if !ok || !ValidClaimText(kid) {
-		return OAuthIdentity{}, errUnauthorized
-	}
-	key, err := v.keys.get(ctx, kid)
+	claims, err := verifyJWT(ctx, raw, v.config.Issuer, v.config.ResourceURL, v.keys)
 	if err != nil {
 		return OAuthIdentity{}, err
 	}
-	if key.algorithm != "" && key.algorithm != token.Method.Alg() {
-		return OAuthIdentity{}, errUnauthorized
-	}
-	options = append(options, jwt.WithValidMethods([]string{token.Method.Alg()}))
-	if _, err := jwt.ParseWithClaims(raw, &claims, func(t *jwt.Token) (any, error) {
-		return key.public, nil
-	}, options...); err != nil {
-		return OAuthIdentity{}, errUnauthorized
-	}
-	clientID := claims.ClientID
-	if clientID == "" {
-		clientID = claims.AZP
-	}
-	if !ValidClaimText(clientID) {
-		clientID = ""
-	}
-	return OAuthIdentity{Issuer: claims.Issuer, Subject: claims.Subject, ClientID: clientID, ExpiresAt: claims.ExpiresAt.Time, Resource: v.config.ResourceURL}, nil
+	return OAuthIdentity{Issuer: claims.Issuer, Subject: claims.Subject, ClientID: claims.ClientID, ExpiresAt: claims.ExpiresAt, Resource: v.config.ResourceURL}, nil
 }
 
-// Middleware authenticates each request and removes its Authorization header
-// and stripHeaders, so that headers meant for another listener, such as the
-// target selection of delegated tokens, never reach next.
 func (v *OAuthVerifier) Middleware(next http.Handler, stripHeaders ...string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		values := r.Header.Values("Authorization")

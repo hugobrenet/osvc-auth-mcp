@@ -16,6 +16,10 @@ collector), which verifies it independently.
     (issuer JWKS, issuer, audience = the resource URL, dates), serves the
     RFC 9728 resource metadata and the 401 challenge. `Middleware` removes the
     `Authorization` header and the headers its caller names.
+  - `JWTVerifier`: verifies access JWTs for an issuer and an audience its
+    caller names, such as the ones a target accepts, with the keys of the
+    issuer discovered and cached per issuer as `OAuthVerifier` does. Errors
+    wrap `ErrInvalidToken` or `ErrVerificationUnavailable`.
   - `ExchangeProfiles`: the confidential exchange clients loaded from
     `auth.yaml`. `Prepare` provides the token of one tool call for a target
     audience; `ExchangedFromContext` returns it to the transport of the
