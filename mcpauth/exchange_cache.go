@@ -17,6 +17,10 @@ const (
 	// exchangeCacheMargin keeps a token that expires soon from being reused:
 	// it must outlive the tool call and the clock skew of the target.
 	exchangeCacheMargin = 30 * time.Second
+	// exchangeFailureMemory is how long a failed exchange is returned again
+	// without contacting the SSO: a client that loops on a refused token
+	// makes at most one SSO request per period.
+	exchangeFailureMemory = 5 * time.Second
 	// exchangeCacheEntries bounds the memory of the cache. When it is full of
 	// live entries, new exchanges are not cached.
 	exchangeCacheEntries = 1024
@@ -32,7 +36,8 @@ type exchanged struct {
 // exchangeCache keeps the exchanged tokens in the memory of the process
 // only, never on disk, for at most exchangeCacheLifetime. Entries are keyed
 // by a hash of the MCP token and the target, never by the MCP token itself.
-// Concurrent calls for the same key share one exchange.
+// Concurrent calls for the same key share one exchange, and a failed
+// exchange is returned again for exchangeFailureMemory.
 type exchangeCache struct {
 	mu      sync.Mutex
 	now     func() time.Time
@@ -48,7 +53,7 @@ type cachedExchange struct {
 	// retry tells waiters that the exchange ended with the context of the
 	// caller that ran it, which says nothing about the SSO.
 	retry bool
-	until time.Time // reuse limit of a successful exchange
+	until time.Time // reuse limit of the result or of the error
 }
 
 func newExchangeCache() *exchangeCache {
@@ -62,14 +67,17 @@ func exchangeCacheKey(subject, profile, audience, target string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// get returns the cached exchange of key while it may be reused, waits for
-// the exchange of key in progress, or runs exchange. Failures are not cached.
+// get returns the cached exchange or failure of key while it may be reused,
+// waits for the exchange of key in progress, or runs exchange.
 func (c *exchangeCache) get(ctx context.Context, key string, exchange func(context.Context) (exchanged, error)) (exchanged, error) {
 	for {
 		c.mu.Lock()
 		e := c.entries[key]
 		if e != nil && !e.pending && c.now().Before(e.until) {
 			c.mu.Unlock()
+			if e.err != nil {
+				return exchanged{}, e.err
+			}
 			return e.result, nil
 		}
 		if e != nil && e.pending {
@@ -103,8 +111,10 @@ func (c *exchangeCache) get(ctx context.Context, key string, exchange func(conte
 			if limit := c.now().Add(exchangeCacheLifetime); limit.Before(e.until) {
 				e.until = limit
 			}
+		} else if !e.retry {
+			e.until = c.now().Add(exchangeFailureMemory)
 		}
-		if cached && (err != nil || !c.now().Before(e.until)) {
+		if cached && (e.retry || !c.now().Before(e.until)) {
 			delete(c.entries, key)
 		}
 		c.mu.Unlock()

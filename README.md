@@ -21,6 +21,7 @@ collector), which verifies it independently.
     audience; `ExchangedFromContext` returns it to the transport of the
     target, with the opaque target value given to `Prepare`, and
     `ForgetExchanged` drops it when the target refuses it (HTTP 401 or 403).
+  - `CallLimiter`: calls in progress and calls per minute of each identity.
   - `CallTrace`: credential-free audit facts of a tool call.
   - `ValidClaimText`, `OpenIDSigningMethod`, `MaxTokenBytes`: the token checks
     shared with the delegated tokens of the MCP servers.
@@ -51,9 +52,23 @@ An exchanged token is kept in the memory of the MCP process, never on disk,
 and reused by the next tool calls of the same MCP token for the same target:
 for at most one minute, and never within 30 seconds of its expiry. The cache
 key is a hash of the MCP token and the target, never the MCP token itself.
-Concurrent calls share one exchange; failures are not cached. When the target
-refuses the token (HTTP 401 or 403), it is forgotten and the next call
-exchanges again. A claim change in the SSO therefore applies within a minute.
+Concurrent calls share one exchange. A failed exchange is returned again for
+five seconds without contacting the SSO, so that a client looping on a refused
+token makes at most one SSO request per period. When the target refuses the
+token (HTTP 401 or 403), it is forgotten and the next call exchanges again. A
+claim change in the SSO therefore applies within a minute.
+
+## Call limits
+
+`CallLimiter` bounds the tool calls of each authenticated identity (issuer and
+subject): `DefaultMaxConcurrentCalls` (10) calls in progress, and
+`DefaultMaxCallsPerMinute` (120) calls per minute with a burst of 30 for an
+idle identity; 0 disables a limit. A refused call fails at once, without
+queueing, with an error that wraps `ErrCallLimited` and tells the client when
+to retry. It protects the SSO and the targets from an authenticated client that
+loops. Limits per IP address, before authentication or for all identities
+belong to the network infrastructure in front of the MCP servers: behind a
+reverse proxy, every request carries the address of the proxy.
 
 ## Development
 

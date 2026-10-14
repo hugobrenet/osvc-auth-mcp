@@ -13,8 +13,8 @@ Use Go, the standard library, `github.com/golang-jwt/jwt/v5` and
   to a server are passed to `Middleware` by that server.
 - An MCP access token never reaches a target, and an exchanged token is never
   usable as an MCP token. Exchanged tokens live only in the in-memory cache
-  (`exchange_cache.go`): at most one minute, keyed by a hash, failures never
-  cached. Never log, return or otherwise store tokens or secrets, and
+  (`exchange_cache.go`): at most one minute, keyed by a hash; failures are
+  remembered five seconds, never longer. Never log, return or otherwise store tokens or secrets, and
   never quote them, or SSO error descriptions, in errors.
 - Discovery, JWKS and token requests use HTTPS, no proxy or redirect, bounded
   reads and no caller credentials.
