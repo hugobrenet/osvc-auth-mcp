@@ -22,9 +22,12 @@ import (
 
 const accessTokenType = "urn:ietf:params:oauth:token-type:access_token"
 
-// ExchangeProfiles holds only administrator-owned credentials and public
-// discovery metadata. User tokens are never cached here.
-type ExchangeProfiles struct{ profiles map[string]*exchangeProfile }
+// ExchangeProfiles holds administrator-owned credentials, public discovery
+// metadata and the short-lived cache of exchanged tokens (exchangeCache).
+type ExchangeProfiles struct {
+	profiles map[string]*exchangeProfile
+	cache    *exchangeCache
+}
 
 type exchangeSettings struct {
 	Issuer     string   `yaml:"issuer"`
@@ -74,7 +77,7 @@ func LoadExchangeProfiles(path string) (*ExchangeProfiles, error) {
 	if d.Decode(&extra) != io.EOF || doc.Version != 1 || len(doc.Profiles) == 0 || len(doc.Profiles) > 64 {
 		return nil, errors.New("exchange profiles: expected one version 1 document with 1 to 64 profiles")
 	}
-	result := &ExchangeProfiles{profiles: make(map[string]*exchangeProfile)}
+	result := &ExchangeProfiles{profiles: make(map[string]*exchangeProfile), cache: newExchangeCache()}
 	for name, s := range doc.Profiles {
 		if !ValidClaimText(name) || !ValidClaimText(s.ClientID) {
 			return nil, errors.New("exchange profiles: invalid name or client_id")
@@ -243,6 +246,7 @@ type exchangedContextKey struct{}
 type exchangedCredential struct {
 	target, token string
 	expires       time.Time
+	forget        func()
 }
 
 // ExchangedFromContext is consumed only by the origin-bound transport of the
@@ -255,10 +259,22 @@ func ExchangedFromContext(ctx context.Context) (target, token string, ok bool) {
 	return c.target, c.token, true
 }
 
-// Prepare exchanges the authenticated MCP token once for one tool call. The
-// profile, the audience and the target, an opaque value such as a cluster ID
-// that ExchangedFromContext returns, come from the administrator
-// configuration, never from raw tool arguments. target may be empty.
+// ForgetExchanged removes the exchanged token of ctx from the cache, so that
+// the next tool call exchanges again. The transport of the target calls it
+// when the target refuses the token (HTTP 401 or 403), which may carry claims
+// that changed since the exchange. It does nothing without an exchanged token.
+func ForgetExchanged(ctx context.Context) {
+	if c, ok := ctx.Value(exchangedContextKey{}).(exchangedCredential); ok && c.forget != nil {
+		c.forget()
+	}
+}
+
+// Prepare provides the token of the target for one tool call: the exchanged
+// token cached for the same MCP token, profile, audience and target, or a new
+// exchange of the authenticated MCP token. The profile, the audience and the
+// target, an opaque value such as a cluster ID that ExchangedFromContext
+// returns, come from the administrator configuration, never from raw tool
+// arguments. target may be empty.
 func (p *ExchangeProfiles) Prepare(ctx context.Context, profile, audience, target string) (context.Context, context.CancelFunc, error) {
 	exchanged, cancel, subject, err := p.prepare(ctx, profile, audience, target)
 	if trace, ok := ctx.Value(callTraceKey{}).(*CallTrace); ok {
@@ -280,9 +296,26 @@ func (p *ExchangeProfiles) prepare(ctx context.Context, profile, audience, targe
 		return nil, nil, "", errors.New("token exchange target is not configured")
 	}
 	s := p.profiles[profile]
-	endpoint, err := s.tokenEndpoint(ctx)
+	key := exchangeCacheKey(subject, profile, audience, target)
+	result, err := p.cache.get(ctx, key, func(ctx context.Context) (exchanged, error) {
+		return s.exchange(ctx, identity, subject, audience)
+	})
 	if err != nil {
 		return nil, nil, "", err
+	}
+	ctx, cancel := context.WithDeadline(ctx, result.deadline)
+	ctx = context.WithValue(ctx, exchangedContextKey{}, exchangedCredential{
+		target: target, token: result.token, expires: result.deadline,
+		forget: func() { p.cache.forget(key, result.token) },
+	})
+	return ctx, cancel, result.subject, nil
+}
+
+// exchange posts one RFC 8693 request and checks the token it returns.
+func (s *exchangeProfile) exchange(ctx context.Context, identity OAuthIdentity, subject, audience string) (exchanged, error) {
+	endpoint, err := s.tokenEndpoint(ctx)
+	if err != nil {
+		return exchanged{}, err
 	}
 	form := url.Values{
 		"grant_type":    {"urn:ietf:params:oauth:grant-type:token-exchange"},
@@ -298,7 +331,7 @@ func (p *ExchangeProfiles) prepare(ctx context.Context, profile, audience, targe
 	}
 	r, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
 	if err != nil {
-		return nil, nil, "", errors.New("token exchange request could not be constructed")
+		return exchanged{}, errors.New("token exchange request could not be constructed")
 	}
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	r.Header.Set("Accept", "application/json")
@@ -307,12 +340,12 @@ func (p *ExchangeProfiles) prepare(ctx context.Context, profile, audience, targe
 	}
 	resp, err := s.client.Do(r)
 	if err != nil {
-		return nil, nil, "", errors.New("token exchange request failed or timed out")
+		return exchanged{}, errors.New("token exchange request failed or timed out")
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxOAuthDocumentBytes+1))
 	if err != nil || len(data) > maxOAuthDocumentBytes {
-		return nil, nil, "", errors.New("token exchange response is unreadable or too large")
+		return exchanged{}, errors.New("token exchange response is unreadable or too large")
 	}
 	if resp.StatusCode != http.StatusOK {
 		// Never echo error_description, upstream body, endpoint or credentials.
@@ -322,9 +355,9 @@ func (p *ExchangeProfiles) prepare(ctx context.Context, profile, audience, targe
 		_ = json.Unmarshal(data, &problem)
 		switch problem.Code {
 		case "invalid_grant", "invalid_target", "invalid_scope", "invalid_client", "unauthorized_client", "unsupported_grant_type", "invalid_request", "access_denied":
-			return nil, nil, "", fmt.Errorf("token exchange refused by SSO (%s)", problem.Code)
+			return exchanged{}, fmt.Errorf("token exchange refused by SSO (%s)", problem.Code)
 		default:
-			return nil, nil, "", errors.New("token exchange failed at the SSO")
+			return exchanged{}, errors.New("token exchange failed at the SSO")
 		}
 	}
 	var result struct {
@@ -334,14 +367,14 @@ func (p *ExchangeProfiles) prepare(ctx context.Context, profile, audience, targe
 		Expires    *int64 `json:"expires_in"`
 	}
 	if json.Unmarshal(data, &result) != nil || !strings.EqualFold(result.Type, "Bearer") || result.IssuedType != accessTokenType || result.Token == subject || len(result.Token) > MaxTokenBytes {
-		return nil, nil, "", errors.New("token exchange returned an invalid access-token response")
+		return exchanged{}, errors.New("token exchange returned an invalid access-token response")
 	}
 	// ParseUnverified does not decode the signature segment. Validate the compact
 	// token alphabet too, so an invalid Authorization header cannot cause an HTTP
 	// transport error that quotes the credential back into a tool result.
 	for _, c := range result.Token {
 		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_' || c == '.') {
-			return nil, nil, "", errors.New("token exchange returned an invalid compact JWT")
+			return exchanged{}, errors.New("token exchange returned an invalid compact JWT")
 		}
 	}
 	// The authenticated SSO response is checked for target and lifetime before
@@ -350,11 +383,11 @@ func (p *ExchangeProfiles) prepare(ctx context.Context, profile, audience, targe
 	token, _, err := jwt.NewParser().ParseUnverified(result.Token, &claims)
 	if err != nil || token == nil || !OpenIDSigningMethod(token.Method.Alg()) || !ValidClaimText(claims.Subject) || !ValidClaimText(claims.Issuer) ||
 		jwt.NewValidator(jwt.WithAudience(audience), jwt.WithExpirationRequired(), jwt.WithIssuedAt()).Validate(&claims) != nil {
-		return nil, nil, "", errors.New("token exchange returned a JWT with invalid target or lifetime")
+		return exchanged{}, errors.New("token exchange returned a JWT with invalid target or lifetime")
 	}
 	// Refuse a token that would still be usable as the MCP credential.
 	if identity.Resource == "" || slices.Contains(claims.Audience, identity.Resource) {
-		return nil, nil, "", errors.New("token exchange did not separate MCP and target audiences")
+		return exchanged{}, errors.New("token exchange did not separate MCP and target audiences")
 	}
 	deadline := claims.ExpiresAt.Time
 	if identity.ExpiresAt.Before(deadline) {
@@ -362,13 +395,11 @@ func (p *ExchangeProfiles) prepare(ctx context.Context, profile, audience, targe
 	}
 	if result.Expires != nil {
 		if *result.Expires <= 0 || *result.Expires > int64((365*24*time.Hour)/time.Second) {
-			return nil, nil, "", errors.New("token exchange returned an invalid lifetime")
+			return exchanged{}, errors.New("token exchange returned an invalid lifetime")
 		}
 		if end := time.Now().Add(time.Duration(*result.Expires) * time.Second); end.Before(deadline) {
 			deadline = end
 		}
 	}
-	ctx, cancel := context.WithDeadline(ctx, deadline)
-	ctx = context.WithValue(ctx, exchangedContextKey{}, exchangedCredential{target: target, token: result.Token, expires: deadline})
-	return ctx, cancel, claims.Subject, nil
+	return exchanged{token: result.Token, subject: claims.Subject, deadline: deadline}, nil
 }

@@ -83,8 +83,8 @@ func TestExchangeUsesAuthenticatedSubjectAndConfidentialClient(t *testing.T) {
 					t.Fatalf("status %d", w.Code)
 				}
 			}
-			if calls.Load() != 2 {
-				t.Fatal("tokens cached across requests")
+			if calls.Load() != 1 {
+				t.Fatalf("the second call of the same MCP token did not reuse the exchange: %d exchanges", calls.Load())
 			}
 			if _, _, ok := ExchangedFromContext(saved); ok {
 				t.Fatal("credential survived call completion")

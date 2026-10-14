@@ -17,9 +17,10 @@ collector), which verifies it independently.
     RFC 9728 resource metadata and the 401 challenge. `Middleware` removes the
     `Authorization` header and the headers its caller names.
   - `ExchangeProfiles`: the confidential exchange clients loaded from
-    `auth.yaml`. `Prepare` exchanges the token of one tool call for a target
+    `auth.yaml`. `Prepare` provides the token of one tool call for a target
     audience; `ExchangedFromContext` returns it to the transport of the
-    target, with the opaque target value given to `Prepare`.
+    target, with the opaque target value given to `Prepare`, and
+    `ForgetExchanged` drops it when the target refuses it (HTTP 401 or 403).
   - `CallTrace`: credential-free audit facts of a tool call.
   - `ValidClaimText`, `OpenIDSigningMethod`, `MaxTokenBytes`: the token checks
     shared with the delegated tokens of the MCP servers.
@@ -43,6 +44,16 @@ profiles:
 The secret file must not be readable by group or others (`0600` or `0400`).
 The scopes are those of the target provider: request the scope that carries
 the claims the target authorizes.
+
+## Exchange cache
+
+An exchanged token is kept in the memory of the MCP process, never on disk,
+and reused by the next tool calls of the same MCP token for the same target:
+for at most one minute, and never within 30 seconds of its expiry. The cache
+key is a hash of the MCP token and the target, never the MCP token itself.
+Concurrent calls share one exchange; failures are not cached. When the target
+refuses the token (HTTP 401 or 403), it is forgotten and the next call
+exchanges again. A claim change in the SSO therefore applies within a minute.
 
 ## Development
 
