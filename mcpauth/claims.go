@@ -8,8 +8,11 @@ package mcpauth
 import (
 	"errors"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/golang-jwt/jwt/v5"
 )
 
 const (
@@ -18,7 +21,27 @@ const (
 	maxMCPBodyBytes = 1 << 20
 )
 
-var errUnauthorized = errors.New("invalid OAuth access token")
+var errUnauthorized = errors.New("invalid access token")
+
+// ClockSkew is the tolerance on the issue and not-before times of a token,
+// for an issuer whose clock is a little ahead. The expiry gets none: it bounds
+// the requests of the token.
+const ClockSkew = 30 * time.Second
+
+// ValidateLifetime validates the registered claims of a token with options,
+// such as its issuer and audience: its expiry, required and not passed, and
+// its issue and not-before times, if any, with ClockSkew of tolerance.
+func ValidateLifetime(claims jwt.Claims, options ...jwt.ParserOption) error {
+	options = append(options, jwt.WithExpirationRequired(), jwt.WithIssuedAt(), jwt.WithLeeway(ClockSkew))
+	if err := jwt.NewValidator(options...).Validate(claims); err != nil {
+		return err
+	}
+	expires, err := claims.GetExpirationTime()
+	if err != nil || expires == nil || !time.Now().Before(expires.Time) {
+		return errors.New("token expired")
+	}
+	return nil
+}
 
 // OpenIDSigningMethod reports whether algorithm is an asymmetric JWS algorithm
 // accepted for OpenID Connect access tokens.

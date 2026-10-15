@@ -20,6 +20,11 @@ collector), which verifies it independently.
     caller names, such as the ones a target accepts, with the keys of the
     issuer discovered and cached per issuer as `OAuthVerifier` does. Errors
     wrap `ErrInvalidToken` or `ErrVerificationUnavailable`.
+  - Both verifiers cache the keys of an issuer 5 minutes and refresh them for
+    an unknown key ID at most every 30 seconds. A refresh never stalls the
+    tokens of a known key, and one cancelled by its caller is not recorded as
+    a failure. `ValidateLifetime` tolerates `ClockSkew` (30 s) on the issue
+    and not-before times of a token, never on its expiry.
   - `ExchangeProfiles`: the confidential exchange clients loaded from
     `auth.yaml`. `Prepare` provides the token of one tool call for a target
     audience; `ExchangedFromContext` returns it to the transport of the

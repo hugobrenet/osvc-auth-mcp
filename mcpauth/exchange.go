@@ -382,7 +382,7 @@ func (s *exchangeProfile) exchange(ctx context.Context, identity OAuthIdentity, 
 	var claims jwt.RegisteredClaims
 	token, _, err := jwt.NewParser().ParseUnverified(result.Token, &claims)
 	if err != nil || token == nil || !OpenIDSigningMethod(token.Method.Alg()) || !ValidClaimText(claims.Subject) || !ValidClaimText(claims.Issuer) ||
-		jwt.NewValidator(jwt.WithAudience(audience), jwt.WithExpirationRequired(), jwt.WithIssuedAt()).Validate(&claims) != nil {
+		ValidateLifetime(&claims, jwt.WithAudience(audience)) != nil {
 		return exchanged{}, errors.New("token exchange returned a JWT with invalid target or lifetime")
 	}
 	// Refuse a token that would still be usable as the MCP credential.
