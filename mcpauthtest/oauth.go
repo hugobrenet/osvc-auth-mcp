@@ -26,6 +26,9 @@ type OAuthProvider struct {
 	MetadataCalls atomic.Int32
 	KeyCalls      atomic.Int32
 	TokenHandler  http.HandlerFunc
+	// KeysGate, when set, holds every JWKS request until it is closed or the
+	// request ends, to test callers waiting for a key refresh.
+	KeysGate chan struct{}
 }
 
 func NewOAuthProvider(t testing.TB) *OAuthProvider {
@@ -47,6 +50,13 @@ func NewOAuthProvider(t testing.TB) *OAuthProvider {
 			data = p.Metadata
 		case "/keys":
 			p.KeyCalls.Add(1)
+			if p.KeysGate != nil {
+				select {
+				case <-p.KeysGate:
+				case <-r.Context().Done():
+					return
+				}
+			}
 			data = p.JWKS
 		case "/token":
 			if p.TokenHandler != nil {

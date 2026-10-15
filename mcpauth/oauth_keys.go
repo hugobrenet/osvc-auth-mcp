@@ -32,7 +32,10 @@ type oauthKey struct {
 
 // Only public signing keys are cached. Unknown kids trigger a refresh at most
 // every 30 seconds, shared across callers, to bound issuer load during rotation
-// or an attack. Expired keys are never used after a failed refresh.
+// or an attack. Expired keys are never used after a failed refresh. The
+// refresh runs without the lock: known kids are served meanwhile, and a caller
+// waiting for it stays bounded by its own context. A refresh ended by the
+// cancellation of its caller is not recorded: it says nothing of the issuer.
 type oauthKeys struct {
 	issuer      string
 	client      *http.Client
@@ -41,36 +44,61 @@ type oauthKeys struct {
 	expires     time.Time
 	lastAttempt time.Time
 	lastErr     error
+	pending     chan struct{} // closed when the refresh in progress ends
 }
 
 func (k *oauthKeys) get(ctx context.Context, kid string) (oauthKey, error) {
-	k.mu.Lock()
-	defer k.mu.Unlock()
-	if ctx.Err() != nil {
-		return oauthKey{}, errOAuthUnavailable
-	}
-	now := time.Now()
-	if key, ok := k.keys[kid]; ok && now.Before(k.expires) {
-		return key, nil
-	}
-	if now.Sub(k.lastAttempt) < oauthRefreshInterval {
-		if k.lastErr != nil || !now.Before(k.expires) {
+	for {
+		k.mu.Lock()
+		if ctx.Err() != nil {
+			k.mu.Unlock()
 			return oauthKey{}, errOAuthUnavailable
 		}
-		return oauthKey{}, errUnauthorized
+		now := time.Now()
+		if key, ok := k.keys[kid]; ok && now.Before(k.expires) {
+			k.mu.Unlock()
+			return key, nil
+		}
+		if pending := k.pending; pending != nil {
+			k.mu.Unlock()
+			select {
+			case <-pending:
+				continue
+			case <-ctx.Done():
+				return oauthKey{}, errOAuthUnavailable
+			}
+		}
+		if now.Sub(k.lastAttempt) < oauthRefreshInterval {
+			unavailable := k.lastErr != nil || !now.Before(k.expires)
+			k.mu.Unlock()
+			if unavailable {
+				return oauthKey{}, errOAuthUnavailable
+			}
+			return oauthKey{}, errUnauthorized
+		}
+		pending := make(chan struct{})
+		k.pending = pending
+		k.mu.Unlock()
+
+		keys, err := k.load(ctx)
+
+		k.mu.Lock()
+		cancelled := err != nil && ctx.Err() != nil
+		if !cancelled {
+			k.lastAttempt, k.lastErr = now, err
+			if err == nil {
+				k.keys, k.expires = keys, time.Now().Add(oauthKeysLifetime)
+			}
+		}
+		k.pending = nil
+		close(pending)
+		k.mu.Unlock()
+		if cancelled {
+			return oauthKey{}, errOAuthUnavailable
+		}
+		// The next iteration answers from the refreshed keys, or from the
+		// failure just recorded.
 	}
-	k.lastAttempt = now
-	keys, err := k.load(ctx)
-	k.lastErr = err
-	if err != nil {
-		return oauthKey{}, errOAuthUnavailable
-	}
-	k.keys, k.expires = keys, time.Now().Add(oauthKeysLifetime)
-	key, ok := k.keys[kid]
-	if !ok {
-		return oauthKey{}, errUnauthorized
-	}
-	return key, nil
 }
 
 func (k *oauthKeys) load(ctx context.Context) (map[string]oauthKey, error) {

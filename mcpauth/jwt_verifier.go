@@ -96,8 +96,7 @@ func verifyJWT(ctx context.Context, raw, issuer, audience string, keys *oauthKey
 	if !ValidClaimText(claims.Subject) {
 		return VerifiedClaims{}, errUnauthorized
 	}
-	options := []jwt.ParserOption{jwt.WithIssuer(issuer), jwt.WithAudience(audience), jwt.WithExpirationRequired(), jwt.WithIssuedAt()}
-	if err := jwt.NewValidator(options...).Validate(&claims); err != nil {
+	if err := ValidateLifetime(&claims, jwt.WithIssuer(issuer), jwt.WithAudience(audience)); err != nil {
 		return VerifiedClaims{}, errUnauthorized
 	}
 	kid, ok := token.Header["kid"].(string)
@@ -111,10 +110,12 @@ func verifyJWT(ctx context.Context, raw, issuer, audience string, keys *oauthKey
 	if key.algorithm != "" && key.algorithm != token.Method.Alg() {
 		return VerifiedClaims{}, errUnauthorized
 	}
-	options = append(options, jwt.WithValidMethods([]string{token.Method.Alg()}))
+	// The signature check validates the claims again, with the same lifetime
+	// tolerance; the expiry was checked strictly above.
 	if _, err := jwt.ParseWithClaims(raw, &claims, func(t *jwt.Token) (any, error) {
 		return key.public, nil
-	}, options...); err != nil {
+	}, jwt.WithIssuer(issuer), jwt.WithAudience(audience), jwt.WithExpirationRequired(), jwt.WithIssuedAt(), jwt.WithLeeway(ClockSkew),
+		jwt.WithValidMethods([]string{token.Method.Alg()})); err != nil {
 		return VerifiedClaims{}, errUnauthorized
 	}
 	clientID := claims.ClientID
