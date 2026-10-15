@@ -9,6 +9,11 @@ intended for the MCP and never reach its target. Each tool call exchanges them
 for a token intended for the target (an OpenSVC cluster daemon or the
 collector), which verifies it independently.
 
+On its Unix socket, an MCP server receives the OpenID Connect access tokens of
+the users of the OpenSVC AI agent, intended for the target. `JWTVerifier`
+verifies them locally, for the provider the target trusts, before they reach
+the target: a forged token costs the target nothing.
+
 ## Packages
 
 - `mcpauth`
