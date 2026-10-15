@@ -1,8 +1,9 @@
 # osvc-auth-mcp: context for coding agents
 
 Shared Go library of the OpenSVC MCP servers, `om3-mcp` and `oc3-mcp`: OAuth
-verification of the incoming MCP access tokens and RFC 8693 exchange for the
-token of the target. Module `github.com/opensvc/osvc-auth-mcp`; no binary.
+verification of the incoming MCP access tokens, RFC 8693 exchange for the
+token of the target, verification of the OpenID Connect tokens of their Unix
+socket for the provider of the target, and per-identity call limits. Module `github.com/opensvc/osvc-auth-mcp`; no binary.
 Use Go, the standard library, `github.com/golang-jwt/jwt/v5` and
 `go.yaml.in/yaml/v2`.
 

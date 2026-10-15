@@ -13,6 +13,8 @@ import (
 // maxVerifierIssuers bounds the issuers a JWTVerifier keeps keys of.
 const maxVerifierIssuers = 4096
 
+// The errors of the verifiers, to compare with errors.Is. They are the very
+// values the verifiers return: never reassign them.
 var (
 	// ErrInvalidToken is the error of a token a verifier refuses.
 	ErrInvalidToken = errUnauthorized
