@@ -276,22 +276,42 @@ func ForgetExchanged(ctx context.Context) {
 // returns, come from the administrator configuration, never from raw tool
 // arguments. target may be empty.
 func (p *ExchangeProfiles) Prepare(ctx context.Context, profile, audience, target string) (context.Context, context.CancelFunc, error) {
-	exchanged, cancel, subject, err := p.prepare(ctx, profile, audience, target)
-	if trace, ok := ctx.Value(callTraceKey{}).(*CallTrace); ok {
-		if err != nil {
-			trace.Exchange = err.Error()
-		} else {
-			trace.Exchange, trace.TargetSubject = "ok", subject
-		}
-	}
-	return exchanged, cancel, err
-}
-
-func (p *ExchangeProfiles) prepare(ctx context.Context, profile, audience, target string) (context.Context, context.CancelFunc, string, error) {
 	identity, subject, ok := OAuthFromContext(ctx)
 	if !ok {
-		return nil, nil, "", errors.New("token exchange requires authenticated MCP credentials")
+		return p.traced(ctx)(nil, nil, "", errors.New("token exchange requires authenticated MCP credentials"))
 	}
+	return p.traced(ctx)(p.prepare(ctx, identity, subject, profile, audience, target))
+}
+
+// PrepareSubject is Prepare for a subject token the caller verified itself,
+// rather than the MCP token of the request: the OpenID Connect token a
+// trusted component delegates on a Unix socket, once a JWTVerifier accepted
+// it for its issuer and audience. identity describes that token: its issuer,
+// subject and expiry, and in Resource its audience, which the exchanged token
+// must not carry. The exchanged token never outlives it.
+func (p *ExchangeProfiles) PrepareSubject(ctx context.Context, identity OAuthIdentity, subject, profile, audience, target string) (context.Context, context.CancelFunc, error) {
+	if subject == "" || len(subject) > MaxTokenBytes || !ValidClaimText(identity.Issuer) || !ValidClaimText(identity.Subject) ||
+		!ValidClaimText(identity.Resource) || !time.Now().Before(identity.ExpiresAt) || ctx.Err() != nil {
+		return p.traced(ctx)(nil, nil, "", errors.New("token exchange requires a verified, unexpired subject token"))
+	}
+	return p.traced(ctx)(p.prepare(ctx, identity, subject, profile, audience, target))
+}
+
+// traced records the outcome of an exchange in the call trace of ctx.
+func (p *ExchangeProfiles) traced(ctx context.Context) func(context.Context, context.CancelFunc, string, error) (context.Context, context.CancelFunc, error) {
+	return func(exchanged context.Context, cancel context.CancelFunc, subject string, err error) (context.Context, context.CancelFunc, error) {
+		if trace, ok := ctx.Value(callTraceKey{}).(*CallTrace); ok {
+			if err != nil {
+				trace.Exchange = err.Error()
+			} else {
+				trace.Exchange, trace.TargetSubject = "ok", subject
+			}
+		}
+		return exchanged, cancel, err
+	}
+}
+
+func (p *ExchangeProfiles) prepare(ctx context.Context, identity OAuthIdentity, subject, profile, audience, target string) (context.Context, context.CancelFunc, string, error) {
 	if !p.Has(profile) || !ValidClaimText(audience) || target != "" && !ValidClaimText(target) {
 		return nil, nil, "", errors.New("token exchange target is not configured")
 	}

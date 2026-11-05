@@ -35,6 +35,10 @@ the target: a forged token costs the target nothing.
     audience; `ExchangedFromContext` returns it to the transport of the
     target, with the opaque target value given to `Prepare`, and
     `ForgetExchanged` drops it when the target refuses it (HTTP 401 or 403).
+    `PrepareSubject` does the same for a token the MCP verified itself,
+    such as a delegated token of the Unix socket that `JWTVerifier`
+    accepted, when the target is not the one it is intended for: om3-mcp
+    exchanges the cluster token of a user for a collector token.
   - `CallLimiter`: calls in progress and calls per minute of each identity.
   - `CallTrace`: credential-free audit facts of a tool call.
   - `ValidClaimText`, `OpenIDSigningMethod`, `MaxTokenBytes`: the token checks

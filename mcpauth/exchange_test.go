@@ -345,3 +345,77 @@ func TestExchangeAcceptsAnEmptyTargetButNotAnInvalidOne(t *testing.T) {
 		t.Fatalf("status=%d exchanges=%d", w.Code, calls.Load())
 	}
 }
+
+// TestPrepareSubjectExchangesAVerifiedToken exchanges a token the caller
+// verified itself, a delegated cluster token, without any MCP credential:
+// the exchanged token is bound to the target and never outlives the subject;
+// an invalid or expired subject never reaches the SSO, and a token still
+// carrying the audience of the subject is refused.
+func TestPrepareSubjectExchangesAVerifiedToken(t *testing.T) {
+	p := mcpauthtest.NewOAuthProvider(t)
+	p.Metadata["token_endpoint"] = p.Server.URL + "/token"
+	profiles, err := LoadExchangeProfiles(mcpauthtest.WriteExchangeProfiles(t, p, "client_secret_basic"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	delegated := p.Token(t, "cluster-a", "alice", nil)
+	outgoing := p.Token(t, "collector", "alice-collector", nil)
+	var calls atomic.Int32
+	wantSubject := delegated
+	p.TokenHandler = func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if r.ParseForm() != nil || r.Form.Get("subject_token") != wantSubject || r.Form.Get("audience") != "collector" {
+			t.Error("invalid exchange contract")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"access_token": outgoing, "token_type": "Bearer", "issued_token_type": accessTokenType})
+	}
+	expires := time.Now().Add(90 * time.Second)
+	identity := OAuthIdentity{Issuer: p.Issuer, Subject: "alice", ExpiresAt: expires, Resource: "cluster-a"}
+	for name, bad := range map[string]func(*OAuthIdentity, *string){
+		"no subject token": func(_ *OAuthIdentity, s *string) { *s = "" },
+		"expired":          func(i *OAuthIdentity, _ *string) { i.ExpiresAt = time.Now().Add(-time.Second) },
+		"no audience":      func(i *OAuthIdentity, _ *string) { i.Resource = "" },
+		"no issuer":        func(i *OAuthIdentity, _ *string) { i.Issuer = "" },
+	} {
+		i, s := identity, delegated
+		bad(&i, &s)
+		if _, _, err := profiles.PrepareSubject(t.Context(), i, s, "test-sso", "collector", "collector"); err == nil {
+			t.Errorf("%s: exchanged", name)
+		}
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("an invalid subject reached the SSO: %d exchanges", calls.Load())
+	}
+	ctx, trace := WithCallTrace(t.Context())
+	exchanged, cancel, err := profiles.PrepareSubject(ctx, identity, delegated, "test-sso", "collector", "collector")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cancel()
+	if target, token, ok := ExchangedFromContext(exchanged); !ok || target != "collector" || token != outgoing {
+		t.Error("incorrect credential binding")
+	}
+	if _, _, ok := OAuthFromContext(exchanged); ok {
+		t.Error("the subject token became an MCP credential")
+	}
+	if deadline, _ := exchanged.Deadline(); deadline.After(expires) {
+		t.Errorf("the exchanged token outlives the subject: %v after %v", deadline, expires)
+	}
+	if trace.Exchange != "ok" || trace.TargetSubject != "alice-collector" {
+		t.Errorf("trace %+v", trace)
+	}
+	// The same subject token reuses the exchange.
+	if _, again, err := profiles.PrepareSubject(t.Context(), identity, delegated, "test-sso", "collector", "collector"); err != nil || calls.Load() != 1 {
+		t.Fatalf("second exchange: %v, %d exchanges", err, calls.Load())
+	} else {
+		again()
+	}
+	// A token still usable on the cluster is refused.
+	outgoing = p.Token(t, "collector", "alice-collector", func(c jwt.MapClaims) { c["aud"] = []string{"collector", "cluster-a"} })
+	other := p.Token(t, "cluster-a", "bob", nil)
+	wantSubject = other
+	if _, _, err := profiles.PrepareSubject(t.Context(), OAuthIdentity{Issuer: p.Issuer, Subject: "bob", ExpiresAt: expires, Resource: "cluster-a"}, other, "test-sso", "collector", "collector"); err == nil {
+		t.Error("a token carrying the subject audience was accepted")
+	}
+}
